@@ -1,0 +1,422 @@
+
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN">
+<html>
+
+<head>
+<meta HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=iso-8859-1">
+<meta NAME="GENERATOR" CONTENT="Microsoft FrontPage 3.0">
+<title>Parsing Expressions by Recursive Descent</title>
+<style type="text/css">
+body {
+  margin: 10ex 10% 10ex 10% ;
+}
+.indented {
+  display: block;
+  margin-right: 10ex;
+  margin-left: 10ex;
+  font-family: Georgia, "Times New Roman", Times, serif;
+}
+.extraInfo {
+  margin-right: 10ex;
+  margin-left: 10ex;
+  background-color: #CCC;
+}
+.kbd { font-family: "Courier New", Courier, monospace, sans-serif ;
+}
+pre { font-family:"Courier New", Courier, monospace ;
+}
+</style></head>
+
+<body>
+
+<h1 align="center">From Precedence Climbing to Pratt Parsing</h1>
+
+<p align="center"><a href="http://www.engr.mun.ca/~theo/">Theodore S. Norvell</a> (C) 2016 </p>
+
+<p><a href="http://www.engr.mun.ca/~theo/Misc/exp_parsing.htm">An earlier article</a> by me explored a number of approaches to recursive descent parsing of expressions, including a particularly simple, effcient, and flexible algorithm&nbsp;invented (as nearly as I can tell) by Martin Richards [7], which I called &quot;precedence climbing&quot;.
+<p>Recently it was pointed out to me by <a href="http://andychu.net/">Andy Chu</a> that precedence climbing is really a special case of Pratt parsing, an algorithm (or approach) invented by Vaughn Pratt [6] in the early 70s. Andy wrote <a href="http://www.oilshell.org/blog/2016/11/03.html">a blog post</a> about it [1]. He goes as far as to say they are the same algorithm; I'd prefer to say that one is a fairly straight-forward generalization of the other.
+<p>The purpose of this post is to explore this connection by starting with precedence climbing&nbsp;and refactoring it to use the command pattern until we arrive at a Pratt parser. We can then expand the language that can be parsed in a modular way.
+<p>For background read my earlier <a href="http://www.engr.mun.ca/~theo/Misc/exp_parsing.htm">article on&nbsp;expression parsing</a> [5], especially the <a href="http://www.engr.mun.ca/~theo/Misc/exp_parsing.htm#climbing">part on precedence climbing</a>.
+<p>If your purpose is learn about Pratt parsing, this post&nbsp;might or might not be for you. If you already know about precedence climbing&nbsp;or are willing to learn about it first, then this article provides a gentle introduction to Pratt parsing, since it shows how Pratt parsing is a refactoring and generalization of the precedence climbing algorithm you already (will) know.
+<p>But if you just want to learn Pratt parsing and don't already know about and don't want to learn about precedence climbing first, this article is probably not the best. There are many tutorials on the web; I haven't read many of them, since I had access to Pratt's original paper; a guide to some of these can be found at <a href="http://www.oilshell.org/blog/2016/11/02.html">http://www.oilshell.org/blog/2016/11/02.html</a> [2].
+<h2>The precedence climbing algorithm</h2>
+<p>This section is a quick review. For a full explanation see <a href="http://www.engr.mun.ca/~theo/Misc/exp_parsing.htm">my earlier article</a>. We'll start with an ambiguous left-recursive grammar.
+<pre>S --&gt; E0 end
+E0 --&gt; E10
+E10 --&gt; E20 | E20 &quot;=&quot; E20
+E20 --&gt; E30 | E20 &quot;+&quot; E30 | E20 &quot;-&quot; E30
+E30 --&gt; E40 | E30 &quot;*&quot; E40 | E30 &quot;/&quot; E40
+E40 --&gt; E50 | E40 &quot;!&quot;
+E50 --&gt; E60 | E60 &quot;^&quot; E50
+E50 --&gt; P
+P --&gt; &quot;-&quot; E30 | &quot;(&quot; E0 &quot;)&quot; | v
+</pre>
+<p> We have (in order of increasing precedence)</p>
+<ul>
+  <li>a nonassociative binary operator &quot;=&quot; (e.g., &quot;a=b=c&quot; is not in the language of S),</li>
+  <li> left-associative operators &quot;+&quot;, and &quot;-&quot;</li>
+  <li>a prefix operator &quot;-&quot;</li>
+  <li> left-associative operators &quot;*&quot;&nbsp;and &quot;/&quot;</li>
+  <li>a postfix operator &quot;!&quot;</li>
+  <li>a right-associative operator &quot;^&quot;.</li>
+</ul>
+<p>The set of tokens includes &quot;=&quot;, &quot;+&quot;, &quot;-&quot;, &quot;*&quot;, &quot;/&quot;, &quot;!&quot;, &quot;^&quot;, &quot;(&quot;, &quot;)&quot;, and a set of variables represented by the symbol&nbsp;v in the grammar. A special token &quot;end&quot; marks the end of the input.</p>
+<p>The ambiguity is resolved by saying that, for example <span class="kbd">-a*b</span> should parse as <span class="kbd">-(a*b)</span>. This precedence is not fully captured by the grammar, since I don't know a nice way to do that.</p>
+<p>The interface to the lexical analyser is via two procedures: <span class="kbd">next</span> returns the next token&nbsp;as a string and <span class="kbd">consume</span> advances the lexical analyser so that <span class="kbd">next</span> returns the subsequent token. When there are no more tokens, <span class="kbd">next</span> will have special value &quot;end&quot;; further calls to <span class="kbd">consume</span>  have no effect on <span class="kbd">next</span>.</p>
+<p>After&nbsp;a few grammar transformations, converting the grammar to code,  some code transformations, and adding some tree building code, we get the following algorithm:</p>
+<pre>S <strong>is</strong> <strong>const</strong> t := E(0) ; expect( end ) ; output(t)
+
+E(p) <strong>is</strong>
+    <strong>precondition</strong> 0 &le; p
+    <strong>var</strong> t := P
+    <strong>var</strong> r := +inf
+    <strong>while</strong> p&le;prec(next)&le;r<strong></strong>
+        <strong>const</strong> b := next
+        consume
+        <strong>if</strong> isBinary(b) <strong>then</strong>
+            <strong>const</strong> y := E( rightPrec(b) )
+            t := mknode(binary(b), t, y)
+        <strong>else</strong> t := mknode(postfix(b), t)
+        r := nextPrec(b)
+    <strong>return</strong> t
+
+P is
+    <strong>if</strong> next=&quot;-&quot; <strong>then</strong> ( consume ; <strong>const</strong> t:= E(30) ; <strong>return</strong> mknode(prefix('-', t)) )
+    <strong>else</strong> <strong>if</strong> next = &quot;(&quot; <strong>then</strong> ( consume ; <strong>const</strong> t := E(0) ; expect(&quot;)&quot;) ; <strong>return</strong> t )
+    <strong>else</strong> <strong>if</strong> next is a v <strong>then</strong> ( <strong>const</strong> t :=  mkleaf(next) ; consume ;  <strong>return</strong> t )
+    <strong>else</strong> error( &quot;Unexpected token '&quot; +next+ &quot;'&quot; )
+
+<u>expect</u>( <u>tok</u> ) <strong>is</strong>
+&nbsp;&nbsp; <strong>if</strong> next = tok
+       consume
+&nbsp;&nbsp; <strong>else</strong>
+       error( &quot;Unexpected token '&quot; +next+ &quot;'; a '&quot; +tok+ &quot;' was expected.&quot; ) </pre>
+<p>and four tables</p>
+<table width="90%" border="1">
+  <tr class="kbd">
+    <th align="right" class="kbd" scope="row"><strong><em>b</em></strong></th>
+    <td align="center"><strong>=</strong></td>
+    <td align="center"><strong>+</strong></td>
+    <td align="center"><strong>-</strong></td>
+    <td align="center"><strong>*</strong></td>
+    <td align="center"><strong>/</strong></td>
+    <td align="center"><strong>!</strong></td>
+    <td align="center"><strong>^</strong></td>
+  </tr>
+  <tr>
+    <th align="right" class="kbd" scope="row">prec(<em>b</em>)</th>
+    <td align="center">10</td>
+    <td align="center">20</td>
+    <td align="center">20</td>
+    <td align="center">30</td>
+    <td align="center">30</td>
+    <td align="center">40</td>
+    <td align="center">50</td>
+  </tr>
+  <tr>
+    <th align="right" class="kbd" scope="row">rightPrec(<em>b</em>)</th>
+    <td align="center">20</td>
+    <td align="center">21</td>
+    <td align="center">21</td>
+    <td align="center">31</td>
+    <td align="center">31</td>
+    <td align="center">NA</td>
+    <td align="center">50</td>
+  </tr>
+  <tr>
+    <th align="right" class="kbd" scope="row">nextPrec(b)</th>
+    <td align="center">9</td>
+    <td align="center">20</td>
+    <td align="center">20</td>
+    <td align="center">30</td>
+    <td align="center">30</td>
+    <td align="center">40</td>
+    <td align="center">49</td>
+  </tr>
+  <tr>
+    <th align="right" class="kbd" scope="row">isBinary(b)</th>
+    <td align="center">true</td>
+    <td align="center">true</td>
+    <td align="center">true</td>
+    <td align="center">true</td>
+    <td align="center">true</td>
+    <td align="center">false</td>
+    <td align="center">true</td>
+  </tr>
+</table>
+<p>Additionally every other token should have a prec of -1. Since p is nonnegative, this will force an exit from the loop in E when a token is encounted that can't be a binary or postfix operator.</p>
+<p>The algorithm handles prefix, postfix, and infix operators&nbsp;in a compact way. We can extend it to handle other operators such as say a ternary</p>
+<p class="indented">y <strong>if</strong> x <strong>else</strong> z</p>
+<p>operator, or an array indexing operation like</p>
+<p class="indented">x&nbsp;[ y ]</p>
+<p>I have done this, for example for my C++ expression parser. However, these extentions are ad hoc and complicate the E and P procedures. To accomodate operators like these and additional prefix operators in a modular way, we can use Pratt parsing.</p>
+<h2>Categories of tokens</h2>
+<p>Before going on, let's look at a way of classifying tokens into three categories. &quot;L&quot; tokens represent operators and such that take some operand on the left. So far&nbsp;this includes binary and postfix operators. Later it will include &quot;[&quot; and &quot;if&quot;. &quot;N&quot; tokens represent tokens that have some meaning, but&nbsp;don't have a left operand. These include prefix operations&nbsp;and variables. I'll also include &quot;(&quot; as an &quot;N&quot; token, since it functions a bit like a prefix operator. &quot;O&quot; tokens are all others. So far only &quot;)&quot; and the end of input marker are &quot;O&quot; tokens; later we'll add &quot;]&quot; and &quot;then&quot;. The &quot;-&quot; operator may be L or N depending on how it is used. Here is an example of classifying tokens</p>
+<pre>&nbsp;&nbsp;   a + - b * ( c - b !&nbsp;) end
+     N L N N L N N L N L O O
+</pre>
+<p>In the precedence climbing algorithm: N tokens are those that are used to make the initial choice in the <span class="kbd">P</span> procedure and that are then consumed as opposed to leading to an error being reported; and L token are those directly consumed by the <span class="kbd">E</span> procedure. In the example, the first <span class="kbd">-</span> is consumed&nbsp;by <span class="kbd">P</span>, so&nbsp;it is an N, while the second is consumed by <span class="kbd">E</span>, so it is an L.</p>
+<h2>Dealing with L tokens</h2>
+<p>First we'll refactor the treatment of binary and postfix operations. The idea is to make procedure E even more data-driven by treating binary and postfix operators  uniformly. We'll map each token to a command object via a table, which I'll call <span class="kbd">leftComm</span>.</p>
+<p>Each command object has three methods</p>
+<pre>&nbsp;   <strong>class</strong> LeftCommand
+
+        <strong>abstract</strong> LeD( x, op ) <strong>returns</strong> Tree
+
+        <strong>abstract</strong> LBP <strong>returns</strong> int
+
+        NBP <strong>returns</strong> int <strong>is</strong>
+            <strong>return</strong> LBP</pre>
+<p> Let's look at each method</p>
+<ul>
+  <li> LBP stands for &quot;left binding power&quot;. It replaces the <span class="kbd">prec</span> table. L tokens will have a nonnegative LBP, while all others have an LBP of -1.</li>
+  <li>NBP stands for the &quot;next binding power&quot;. It replaces the <span class="kbd">nextPrec</span>&nbsp;table. I.e. it gives the highest precedence of the operator that this&nbsp;operator can be a left operand of.</li>
+  <li>LeD stands for &quot;left denotation&quot;.&nbsp;It takes a left operand (x) and an operator (op) and returns the value denoted by the operator considered as an L token. In the case of a binary operator, it is responsible also for parsing the right operand. The LeD method won't be called if the LBP is negative.</li>
+</ul>
+<p>We'll rewrite the E procedure to use commands.</p>
+<pre>E(p) <strong>is</strong>
+    <strong>precondition</strong> 0 &le; p<strong>
+    var</strong> t := P
+    <strong>var</strong> r := +inf
+    <strong>var</strong> b
+    <strong>loop</strong>
+        b := next
+    <strong>    var</strong> c := leftComm[b]
+    <strong>    exit unless</strong><strong></strong> p &le; c.LBP &le; r<strong></strong>
+        consume
+        t := c.LeD( t, b )
+        r := c.NBP
+    <strong>return</strong> t
+</pre>
+<p>As happens often in OO programming, we've replaced a choice made by an if command with dynamic dispatch. Here we've replaced the lines</p>
+<pre>&nbsp;   <strong>if </strong>isBinary(b) <strong>then</strong>
+        <strong>const</strong> y := E( rightPrec(b) )
+        t := mknode(binary(b), t, y)
+<strong>    else</strong>
+        t := mknode(postfix(b), t) </pre>
+<p>With the line <span class="kbd">t := c.LeD( t, b )</span>.</p>
+<p>So the responsibility of the LeD method is to parse any operands that come after the operator and to build a representation (denotation) of the operation.</p>
+<p>Binary and postfix operators have an LBP that is nonnegative</p>
+<pre>
+<strong>abstract class</strong> BinaryOrPost( lbp ) <strong>extends</strong> LeftCommand<strong>
+
+    protected const</strong> lbp := lbp
+
+    <strong>override</strong> LBP <strong>is</strong>
+        <strong>return </strong>lbp</pre>
+<p class="extraInfo">What I mean by the second line is that the field named lbp is inialized to the value of the constructor parameter named lbp. In Java we'd implement this with a line in the constructor that says this.lbp = lbp.</p>
+<p>Binary operators have a LeD method that parses the right operand. There are 3 variations</p>
+<pre>
+<strong>abstract class</strong> BinaryOperator( lbp ) <strong>extends</strong> BinaryOrPost( lpb )
+
+    <strong>abstract</strong> RBP
+
+    <strong>overide</strong> LeD( x, op&nbsp;) is
+        <strong>const</strong> y := E( <strong>this</strong>.RBP )
+        <strong>return</strong> mknode( binary(op), x, y )
+<strong>
+
+class</strong> BopLeftAssoc( lbp ) <strong>extends</strong> BinaryOrPost( lpb )
+
+    <strong>override</strong> RBP <strong>is</strong> <strong>return</strong> 1 + <strong>this</strong>.LBP</pre>
+<pre>
+<strong>class</strong> BopRightAssoc( lbp ) <strong>extends</strong> BinaryOrPost( lpb )
+
+    <strong>overide</strong> RBP <strong>is</strong> <strong>return</strong> <strong>this</strong>.LBP<strong>
+
+class</strong> BopNonAssoc( lbp ) <strong>extends</strong> BinaryOrPost( lpb
+
+    <strong>override</strong> RBP <strong>is</strong> <strong>return</strong> 1 +<strong> this</strong>.LBP<strong>
+
+    override</strong> NBP <strong>is</strong> <strong>return</strong> <strong>this</strong>.LBP - 1</pre>
+<p>Postfix operators don't  have a right operand and so they don't parse one&nbsp;in&nbsp;their LeD method</p>
+<pre><strong>class</strong> Postfix( lbp ) <strong>extends</strong> BinaryOrPost( lpb )
+
+    <strong>overide</strong> LeD( x, ok&nbsp;) <strong>is</strong>
+        <strong>return</strong> mknode( postfix(op), x )</pre>
+<p>We fill the table like this</p>
+<pre>leftComm[ &quot;=&quot; ] := <strong>new</strong> BopNonAssoc( 10 )
+leftComm[ &quot;+&quot; ] := <strong>new</strong> BopLeftAssoc( 20 )
+leftComm[ &quot;-&quot; ] :=  <strong>new</strong> BopLeftAssoc( 20 )
+leftComm[ &quot;*&quot; ] :=  <strong>new</strong> BopLeftAssoc( 30 )
+leftComm[ &quot;/&quot; ] :=  <strong>new</strong> BopLeftAssoc( 30 )
+leftComm[ &quot;!&quot; ] :=  <strong>new</strong> Postfix( 40 )
+leftComm[ &quot;^&quot; ] :=  <strong>new</strong> BopRightAssoc( 50 )
+</pre>
+<p>For every other token, the <span class="kbd">leftComm</span> table uses a&nbsp;direct instance of <span class="kbd">DefaultLeftCommand</span>, (below) ensuring that its <span class="kbd">LBP</span> is -1. This will force an exit from the loop in <span class="kbd">E</span> when a non-L token is encountered, as the <span class="kbd">p</span> parameter is never less than 0.</p>
+<pre>
+    <strong>class</strong> DefaultLeftCommand <strong>extends</strong> LeftCommand
+
+        <strong>override</strong> LBP <strong>is</strong> <strong>return</strong> -1
+
+        <strong>override</strong> LeD( x, op ) <strong>is</strong> // Should not be called!
+            <strong>assert</strong> false</pre>
+<p>At this point, we can see how to implement the indexing (x[y]) operation and the conditional (y if x else z) operation. I'll give these precedences of 60 and 5 respectively. </p>
+<pre>leftComm[ &quot;[&quot; ] := new IndexOp( 60 )
+leftComm[ &quot;if&quot;] := new ConditionalOp( 5 )
+
+<strong>class</strong> IndexOp( lbp ) <strong>extends</strong> BinaryOrPost( lbp )
+
+    <strong>overide</strong> LeD( x, op&nbsp;) is<strong>
+        const</strong> y := E( 0 )
+        expect( &quot;]&quot; )
+        <strong>return</strong> mknode( binary( &quot;index&quot; ), x, y )
+
+<strong>class</strong> ConditionalOp( lbp ) <strong>extends</strong> BinaryOrPost( lpb )
+
+    <strong>overide</strong> LeD( y, op&nbsp;) is<strong>
+        const</strong> x := E( 0 )
+        expect( &quot;then&quot; )<strong>
+        const</strong> z := E( 1 + this.LBP )
+        <strong>return</strong> mknode( ternary( &quot;if&quot; ), x, y, z )
+
+    <strong>override</strong> NBP <strong>is</strong>
+        <strong>return</strong> <strong>this</strong>.LBP - 1
+</pre>
+<p class="extraInfo">I've made the&nbsp;conditional nonassociative to rule out confusing expressions like <span class="kbd">x if a else y if b else z</span>. </p>
+<p>Let's treat = as a &quot;chaining&nbsp;operator&quot; rather than non-associative. That is <span class="kbd">x=y=z</span> should mean <span class="kbd">(x=y) and (y=z)</span>. While&nbsp;we're at it, we can introduce operators &lt;, &le;, &gt;, and &ge; that&nbsp;can also be used in chains of comparisons</p>
+<pre>leftComm[ &quot;=&quot; ] := <strong>new</strong> Chaining( 10 )
+leftComm[ &quot;&lt;&quot; ] := <strong>new</strong> Chaining( 10 )
+leftComm[ &quot;&le;&quot; ] := <strong>new</strong> Chaining( 10 )
+leftComm[ &quot;&gt;&quot; ] := <strong>new</strong> Chaining( 10 )
+leftComm[ &quot;&ge;&quot; ] := <strong>new</strong> Chaining( 10 )
+
+<strong>class</strong> Chaining( lbp ) <strong>extends</strong> BinaryOrPost( lbp )
+
+    <strong>overide</strong> LeD( x, op&nbsp;) <strong>is
+        const</strong> y := E( 1 + <strong>this</strong>.LBP )
+        <strong>const</strong> t := mknode( binary( op ), x, y )
+        <strong>if</strong> next &isin; {&quot;=&quot;, &quot;&lt;&quot;, &quot;&le;&quot;, &quot;&gt;&quot;, &quot;&ge;&quot;}
+            <strong>const</strong> nextOp := next
+            consume
+            <strong>const</strong> t1 := <strong>this</strong>.LeD( y, nextOp )
+            <strong>return</strong> mkNode( binary( &quot;and&quot;, t, t1 )
+        <strong>else</strong>
+            <strong>return</strong> t
+
+    <strong>override</strong> NBP <strong>is</strong>
+        <strong>return</strong> <strong>this</strong>.LBP - 1
+</pre>
+<p>From a software engineering point of view, the important point is how modular these additions and alterations are. The basic parsing procedure <span class="kbd">E</span> did not need to change, only the table.</p>
+<h2>Dealing with N tokens</h2>
+<p>Can we make the treatment of prefix operators and other N tokens equally modular? Remember the N tokens are &quot;-&quot;, &quot;(&quot;, and the variables v.</p>
+<p>These are currently dealt with in the <span class="kbd">P</span> procededure.</p>
+<pre>
+P is
+    <strong>if</strong> next=&quot;-&quot; <strong>then</strong> ( consume ; <strong>const</strong> t:= E(30) ; <strong>return</strong> mknode(prefix('-', t)) )
+    <strong>else</strong> <strong>if</strong> next = &quot;(&quot; <strong>then</strong> ( consume ; <strong>const</strong> t := E(0) ; expect(&quot;)&quot;) ; <strong>return</strong> t )
+    <strong>else</strong> <strong>if</strong> next is a v <strong>then</strong> ( <strong>const</strong> t :=  mkleaf(next) ; consume ;  <strong>return</strong> t )
+    <strong></strong><strong>else</strong> error( &quot;Unexpected token '&quot; +next+ &quot;'&quot; ) </pre>
+<p>Our next change is to make the P procedure data&nbsp;driven; i.e. to use dynamic dispatch to choose the course of action.</p>
+<pre>
+P is
+    <strong>const</strong> token := next<strong>
+    </strong>consume
+    <strong>return</strong> nullComm[token].NuD( token )
+</pre>
+<p><span class="kbd">nullComm</span> is a table analogous to <span class="kbd">leftComm</span>, but used for N tokens.</p>
+<pre>nullComm[ &quot;-&quot; ] := <strong>new</strong> UnaryOp( 30&nbsp;)
+nullComm[ &quot;(&quot; ] := <strong>new</strong> Parens
+nullComm[ v&nbsp;] := <strong>new</strong>&nbsp;Leaf</pre>
+<p>The last line needs to be repeated for each possible variable -- although the same command object can be shared for all entries. All other tokens (all non-N tokens) should map to an instance of <span class="kbd">ErrorNullCommand</span>.</p>
+<p>Now we need some classes for commands</p>
+<pre><strong>class</strong> NullCommand
+    <strong>abstract</strong> NuD( op ) <strong>returns</strong> Tree
+<strong>
+class</strong> ErrorNullCommand <strong>extends</strong> NullCommand
+
+    <strong>override</strong> NuD( op ) <strong>is</strong>
+        error( &quot;Unexpected token '&quot; +op+ &quot;'&quot; )
+
+<strong>class</strong> UnaryOp( rbp ) <strong>extends</strong> NullCommand
+
+    <strong>protected</strong> <strong>const</strong> rbp := rbp
+
+    <strong>override</strong> NuD( op ) <strong>is</strong>
+        <strong>const</strong> y := Exp( this.rbp )
+        <strong>return</strong> mkNode( prefix( op&nbsp;), y )
+
+<strong>class</strong> Parens <strong>extends</strong> NullCommand
+
+    <strong>override</strong> NuD( op ) <strong>is</strong>
+        <strong>const</strong> t := E( 0 )
+        expect( &quot;)&quot; )
+        <strong>return</strong> t
+
+<strong>class</strong> Leaf <strong>extends</strong> NullCommand
+
+    <strong>override</strong> NuD( op ) <strong>is</strong>
+        <strong>return</strong> mkLeaf( op )
+</pre>
+<p>  Now it's easy to add new kinds of prefix operators and such. For example we can add expressions like<span class="kbd"> if x then y else z</span> to the language like this.</p>
+<pre>nullComm[ &quot;if&quot; ] := <strong>new</strong> IfThenElse(&nbsp;)
+
+<strong>class</strong> IfThenElse <strong>extends</strong> NullCommand
+
+    <strong>override</strong> NuD( op ) <strong>is</strong>
+        <strong>const</strong> x := Exp( 0 )
+        expect( &quot;then&quot; )
+        <strong>const</strong> y := Exp( 0 )
+        expect( &quot;else&quot; )
+        <strong>const</strong> z := Exp( 0 )
+        <strong>return</strong> mknode( ternary( &quot;if&quot; ), x, y, z )</pre>
+<p>It might not be the best language design choice, but it is interesting that&nbsp;we can use both syntaxes for conditional expressions in the same language; there is no difficulty for the parser to handle, for example</p>
+<pre>&nbsp;   if a if b else c then d if e&nbsp;else f else if g then h else i if j else k</pre>
+<h2>Summary</h2>
+<p>Here is the final version of the core algorithm after inlining P.</p>
+<pre>
+E(p) <strong>is</strong>
+    <strong>precondition</strong> 0 &le; p
+    <strong>var</strong> token := next<strong>
+    </strong>consume
+    <strong>var</strong> t := nullComm[token].NuD( token )
+    <strong>var</strong> r := +inf
+    <strong>loop</strong>
+        token := next
+        <strong>const</strong> c := leftComm[token]
+    <strong>    exit unless</strong><strong></strong> p &le; c.LBP &le; r
+        consume
+        t := c.LeD( t, token )
+        r := c.NBP
+    <strong>return</strong> t
+</pre>
+<h2>Comparing with Pratt's paper</h2>
+<p>Pratt's paper was not written in an object-oriented style. Instead he puts procedures directly in tables. For this reason he has 3 tables rather than 2: NuD, LeD, LBP. (The addition of NBP is my own; see below.)&nbsp; Using classes and objects makes it easy to share code, for example sharing&nbsp;the LeD method between the 3 subclasses of binary operators.</p>
+<p>Pratt assumes dynamic&nbsp;scoping of variables, which would have been the norm in LISP implementations at the time. He also describes the main algorithm with a diagram that seems to miss some of the details.</p>
+<p>I took the names LeD, NuD, and LBP from Pratt. I would have used other names myself, but it's worth being consistent&nbsp;with&nbsp;Pratt and other presentations.</p>
+<h2>Implementation details and other design choices</h2>
+<p>One thing that might bother the reader is the need to have tables that map a&nbsp;large (perhaps infinite) set of tokens.&nbsp;For most applications, there is no need to change the tables at run time, so the tables can be implemented as a pair of procedures.&nbsp;(In OO terms we need a factory that has methods leftComm and nullComm.) And in most cases all we need to know is the category of token, not the actual token string; so we can use an array indexed by the token categories. </p>
+<p>In some cases we do want to be able to change the tables during run time. For example, Haskell lets the programmer declare the precedence of binary operators; and most Prolog dialects allow one to declare new operators along with associativity and precedence. If we do want to change the table on the fly, a hash map can be used.</p>
+<p>Having reduced the number of tables from 3 in Pratt's paper to 2, the next step might be to have one table and only one kind of command. I.e. ensure that every concrete command has all 4 methods (LeD, LBP, NBP, and Nud). I didn't do this, because we might want to vary the tables independently. Consider adding function application syntax x(y) to the language. What does this have to do with parenthesization? Nothing really. Yet if I only had one command class&nbsp;for &quot;(&quot;, it would have responsibilities for both parenthesization and function application. The  treatment of a token when it's used as an N token and when it's used as an L token are&nbsp;two different responsibilities&nbsp;and shouldn't be in the same class.</p>
+<p>Another approach is to do away with the tables and use objects as tokens that have the LeD, LBP, NBP, and NuD methods built into&nbsp;them. The comments of the previous paragraph apply.</p>
+<p>As mentioned above, the NBP method is my own addition. It's used for making binary operators --and the like-- nonassociative.&nbsp;If you don't have need of it, don't implement it and change the E procedure to </p>
+<pre>E(p) <strong>is</strong>
+    <strong>var</strong> token := next<strong>
+    </strong>consume
+    <strong>var</strong> t := nullComm[token].NuD( token )
+    <strong>loop</strong>
+        token := next
+        <strong>const</strong> c := leftComm[token]
+    <strong>    exit unless</strong><strong></strong> p &le; c.LBP
+        consume
+        t := c.LeD( t, token )
+    <strong>return</strong> t
+</pre>
+<p>&nbsp;</p>
+<h2>References</h2>
+<p>[0] Eli Bendersky, &quot;Top-Down operator precedence parsing&quot;, January 2010, <a href="http://eli.thegreenplace.net/2010/01/02/top-down-operator-precedence-parsing">http://eli.thegreenplace.net/2010/01/02/top-down-operator-precedence-parsing</a></p>
+<p>[1] Andy Chu, &quot;Pratt Parsing and Precedence Climbing Are the Same Algorithm&quot;, Nov 2016. <a href="http://www.oilshell.org/blog/2016/11/01.html">http://www.oilshell.org/blog/2016/11/01.html</a></p>
+<p>[2] Andy Chu, &quot;Review of Pratt/TDOP Parsing Tutorials&quot;, Nov 2016. <a href="http://www.oilshell.org/blog/2016/11/02.html">http://www.oilshell.org/blog/2016/11/02.html</a></p>
+<p>[3] Andy Chu, &quot;Pratt Parsing Without Prototypal Inheritance, Global Variables, Virtual Dispatch, or Java&quot;. &quot;http://www.oilshell.org/blog/2016/11/03.html&quot;</p>
+<p>[4] Keith Clarke, <a href="http://antlr.org/papers/Clarke-expr-parsing-1986.pdf">"The top-down parsing of expressions"</a>, Research Report 383, Dept of Computer Science, Queen Mary College. Archived at <a href="http://antlr.org/papers/Clarke-expr-parsing-1986.pdf">http://antlr.org/papers/Clarke-expr-parsing-1986.pdf</a>.</p>
+<p>[5] Theodore S. Norvell, &quot;Parsing Expressions by Recursive Descent&quot;, 1999&nbsp;(revised 2013), <a href="www.engr.mun.ca/~theo/Misc/exp_parsing.htm">www.engr.mun.ca/~theo/Misc/exp_parsing.htm</a></p>
+<p>[6] Vaughn R. Pratt, &quot;Top down operator precedence&quot;, Proceedings of the 1st symposium on principles of programming languages (POPL), 1973, <a href="http://dl.acm.org/citation.cfm?id=512931">http://dl.acm.org/citation.cfm?id=512931</a></p>
+<p>[7] Martin Richards and Collin Whitby-Stevens, <em>BCPL -- the language and its compiler</em>, Cambridge University Press, 1979.</p>
+<h2>Acknowledgement</h2>
+<p>Thanks to
+
+
+ <a href="http://andychu.net/">Andy Chu</a> for pointing out the connection between precedence climbing and Pratt parsing.</p>
+<p>&nbsp;</p>
+</body>
+</html>
